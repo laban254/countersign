@@ -1,0 +1,318 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AgentStatus {
+  ACTIVE
+  PAUSED
+  REVOKED
+}
+
+enum ApprovalMode {
+  NEVER
+  ABOVE_THRESHOLD
+  ALWAYS
+}
+
+enum PolicyVersionStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum RecipientStatus {
+  APPROVED
+  BLOCKED
+}
+
+enum Decision {
+  AUTHORIZED
+  PENDING_APPROVAL
+  DENIED
+}
+
+enum PaymentStatus {
+  RECEIVED
+  DENIED
+  PENDING_APPROVAL
+  REJECTED
+  EXPIRED
+  APPROVED
+  EXECUTING
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  UNCLAIMED
+  RETURNED
+  HELD
+  BLOCKED
+  REFUNDED
+}
+
+enum ReservationStatus {
+  HELD
+  SETTLED
+  RELEASED
+  EXPIRED
+}
+
+enum ActorType {
+  USER
+  AGENT
+  SYSTEM
+  PAYPAL
+  AI
+}
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  users         User[]
+  agents        Agent[]
+  policies      Policy[]
+  recipients    Recipient[]
+  paymentIntents PaymentIntent[]
+  ledgerEvents  LedgerEvent[]
+
+  @@map("workspaces")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  workspaceId  String    @map("workspace_id")
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  name         String
+  role         String    @default("OWNER")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("users")
+}
+
+model Agent {
+  id                    String      @id
+  workspaceId           String      @map("workspace_id")
+  name                  String
+  description           String      @default("")
+  tokenPrefix           String      @map("token_prefix")
+  tokenHash             String      @map("token_hash")
+  status                AgentStatus @default(ACTIVE)
+  activePolicyVersionId String?     @map("active_policy_version_id")
+  createdAt             DateTime    @default(now()) @map("created_at")
+  lastUsedAt            DateTime?   @map("last_used_at")
+
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  paymentIntents PaymentIntent[]
+
+  @@index([workspaceId])
+  @@index([status])
+  @@map("agents")
+}
+
+model Policy {
+  id          String   @id
+  workspaceId String   @map("workspace_id")
+  name        String
+  description String   @default("")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  versions  PolicyVersion[]
+
+  @@index([workspaceId])
+  @@map("policies")
+}
+
+model PolicyVersion {
+  id                     String              @id
+  policyId               String              @map("policy_id")
+  version                Int
+  maxTransactionMinor    BigInt              @map("max_transaction_minor")
+  dailyLimitMinor        BigInt              @map("daily_limit_minor")
+  monthlyLimitMinor      BigInt              @map("monthly_limit_minor")
+  approvalMode           ApprovalMode        @map("approval_mode")
+  approvalThresholdMinor BigInt?             @map("approval_threshold_minor")
+  allowNewRecipients     Boolean             @default(false) @map("allow_new_recipients")
+  currencyAllowlist      String[]            @default(["USD"]) @map("currency_allowlist")
+  status                 PolicyVersionStatus @default(DRAFT)
+  createdBy              String              @map("created_by")
+  createdAt              DateTime            @default(now()) @map("created_at")
+  changeNote             String?             @map("change_note")
+
+  policy         Policy          @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  paymentIntents PaymentIntent[]
+
+  @@unique([policyId, version])
+  @@index([policyId, status])
+  @@map("policy_versions")
+}
+
+model Recipient {
+  id          String          @id
+  workspaceId String          @map("workspace_id")
+  displayName String          @map("display_name")
+  email       String
+  status      RecipientStatus @default(APPROVED)
+  createdAt   DateTime        @default(now()) @map("created_at")
+  createdBy   String          @map("created_by")
+
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  paymentIntents PaymentIntent[]
+
+  @@unique([workspaceId, email])
+  @@index([workspaceId, status])
+  @@map("recipients")
+}
+
+model PaymentIntent {
+  id                String        @id
+  workspaceId       String        @map("workspace_id")
+  agentId           String        @map("agent_id")
+  policyVersionId   String        @map("policy_version_id")
+  policySnapshot    Json          @map("policy_snapshot")
+  recipientId       String?       @map("recipient_id")
+  recipientSnapshot Json          @map("recipient_snapshot")
+  amountMinor       BigInt        @map("amount_minor")
+  currency          String        @default("USD")
+  description       String
+  invoiceReference  String        @map("invoice_reference")
+  metadata          Json          @default("{}")
+  idempotencyKey    String        @map("idempotency_key")
+  requestHash       String        @map("request_hash")
+  decision          Decision
+  status            PaymentStatus @default(RECEIVED)
+  reasonCodes       String[]      @map("reason_codes")
+  explanation       String
+  checks            Json          @default("[]")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  workspace     Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agent         Agent              @relation(fields: [agentId], references: [id])
+  policyVersion PolicyVersion      @relation(fields: [policyVersionId], references: [id])
+  recipient     Recipient?         @relation(fields: [recipientId], references: [id])
+  approval      Approval?
+  reservation   BudgetReservation?
+  payout        PayPalPayout?
+
+  @@unique([workspaceId, agentId, idempotencyKey])
+  @@index([workspaceId, status])
+  @@index([createdAt(sort: Desc)])
+  @@map("payment_intents")
+}
+
+model Approval {
+  id              String    @id
+  paymentIntentId String    @unique @map("payment_intent_id")
+  requestedAt     DateTime  @default(now()) @map("requested_at")
+  expiresAt       DateTime  @map("expires_at")
+  reviewedAt      DateTime? @map("reviewed_at")
+  reviewedBy      String?   @map("reviewed_by")
+  decision        String?
+  comment         String?
+  snapshotHash    String    @map("snapshot_hash")
+
+  paymentIntent PaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+
+  @@map("approvals")
+}
+
+model BudgetReservation {
+  id              String            @id
+  paymentIntentId String            @unique @map("payment_intent_id")
+  agentId         String            @map("agent_id")
+  amountMinor     BigInt            @map("amount_minor")
+  currency        String            @default("USD")
+  status          ReservationStatus @default(HELD)
+  createdAt       DateTime          @default(now()) @map("created_at")
+  expiresAt       DateTime          @map("expires_at")
+  releasedAt      DateTime?         @map("released_at")
+  settledAt       DateTime?         @map("settled_at")
+
+  paymentIntent PaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, status])
+  @@map("budget_reservations")
+}
+
+model PayPalPayout {
+  id              String   @id
+  paymentIntentId String   @unique @map("payment_intent_id")
+  payoutBatchId   String   @unique @map("payout_batch_id")
+  payoutItemId    String   @unique @map("payout_item_id")
+  transactionId   String?  @map("transaction_id")
+  batchStatus     String   @map("batch_status")
+  itemStatus      String   @map("item_status")
+  rawResponse     Json     @default("{}") @map("raw_response")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  paymentIntent PaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+
+  @@map("paypal_payouts")
+}
+
+model LedgerEvent {
+  id              Int       @id @default(autoincrement())
+  workspaceId     String    @map("workspace_id")
+  agentId         String?   @map("agent_id")
+  paymentIntentId String?   @map("payment_intent_id")
+  eventType       String    @map("event_type")
+  actorType       ActorType @map("actor_type")
+  actorId         String    @map("actor_id")
+  payload         Json
+  prevHash        String    @map("prev_hash")
+  hash            String    @map("hash")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt(sort: Desc)])
+  @@map("ledger_events")
+}
+
+model PayPalWebhookEvent {
+  id                 String    @id @default(cuid())
+  providerEventId    String    @unique @map("provider_event_id")
+  eventType          String    @map("event_type")
+  payload            Json
+  signatureVerified  Boolean   @default(false) @map("signature_verified")
+  processingStatus   String    @default("RECEIVED") @map("processing_status")
+  receivedAt         DateTime  @default(now()) @map("received_at")
+  processedAt        DateTime? @map("processed_at")
+
+  @@map("paypal_webhook_events")
+}
+
+// Durable runtime snapshot. The normalized tables above remain the target
+// model; this table provides restart-safe persistence for the demo runtime
+// without requiring a full per-entity repository rewrite.
+model RuntimeSnapshot {
+  id        String   @id
+  data      Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("runtime_snapshots")
+}
+
+// Append-only anchor for the ledger head. Each snapshot save records the
+// current head hash and event count. A truncated snapshot no longer matches
+// the latest anchor and is rejected at startup.
+model LedgerAnchor {
+  id         Int      @id @default(autoincrement())
+  headHash   String   @map("head_hash")
+  eventCount Int      @map("event_count")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("ledger_anchors")
+}

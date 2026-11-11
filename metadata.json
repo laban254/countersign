@@ -1,0 +1,8 @@
+{
+  "name": "Countersign",
+  "description": "An authorization and audit layer between autonomous AI agents and payment execution, featuring deterministic spending policies, budget reservations, human countersign approvals, PayPal Payouts integration, and a tamper-evident append-only ledger.",
+  "requestFramePermissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

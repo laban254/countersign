@@ -1,0 +1,909 @@
+openapi: 3.0.3
+info:
+  title: Countersign Agent API
+  version: 1.0.0
+  description: |
+    Countersign sits between an autonomous AI agent and payment execution. An agent submits a **payment
+    intent**; Countersign authenticates the agent, evaluates the request against its immutable spending
+    policy with a deterministic engine, and returns one of three decisions:
+
+    | Decision | HTTP status | Meaning |
+    |---|---|---|
+    | `AUTHORIZED` | `201` | Allowed. The PayPal Payouts request is submitted. |
+    | `PENDING_APPROVAL` | `201` | Within limits but needs a human countersign (threshold or new recipient). Budget is reserved. |
+    | `DENIED` | `422` | Hard policy violation. Recorded, never sent to PayPal. |
+
+    The agent can never approve its own payment. Approvals are made by a human in the Countersign console.
+    Payout settlement is confirmed asynchronously (PayPal webhooks plus reconciliation polling), so poll
+    `GET /agent/payment-intents/{id}` for the final status.
+
+    **Authentication.** Every agent request carries the agent's bearer token (`cs_<agentId>_<secret>`),
+    issued once when the agent is registered. The token determines which agent (and therefore which
+    policy) applies; any `agent_id` in a request body is ignored.
+
+    **Idempotency.** Send an `Idempotency-Key` header on every `POST`. Re-sending the same key with the same
+    body returns the original intent (`200` with `Idempotent-Replay: true`). Re-using a key with a
+    different body is rejected with `409 IDEMPOTENCY_KEY_REUSED`.
+
+    **Amounts** are decimal strings in major units (for example `"49.00"`). Currency is an ISO code; the
+    sandbox policy allows `USD`.
+
+    This is a PayPal **Sandbox** prototype. No real money moves.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  contact:
+    name: Countersign
+    url: https://github.com/laban254/countersign
+  termsOfService: https://github.com/laban254/countersign/blob/main/LICENSE
+servers:
+- url: https://your-countersign-host/api/v1
+  description: Your Countersign deployment (replace with your host)
+tags:
+- name: Payment intents
+  description: Request, inspect and track agent payments.
+- name: Agent
+  description: Information about the authenticated agent.
+- name: System
+  description: Service health.
+security:
+- agentBearer: []
+externalDocs:
+  description: Project documentation and source
+  url: https://github.com/laban254/countersign#readme
+paths:
+  /health:
+    get:
+      tags:
+      - System
+      operationId: getHealth
+      summary: Service health
+      description: Public liveness check that also reports whether the audit ledger hash chain is intact.
+      security: []
+      responses:
+        '200':
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+                service: Countersign Financial Control Plane
+                timestamp: '2026-11-11T17:02:15.509Z'
+                ledgerChainValid: true
+                ledgerHeadHash: 7d99d803517b4163cf5b2e1474eb7ba8a66551142d25306e9f0972a25a47e844
+                authRequired: true
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /agent/me:
+    get:
+      tags:
+      - Agent
+      operationId: getCurrentAgent
+      summary: Get the authenticated agent
+      description: Returns the agent identified by the bearer token. The token hash is never returned.
+      responses:
+        '200':
+          description: The authenticated agent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /agent/payment-intents:
+    post:
+      tags:
+      - Payment intents
+      operationId: createPaymentIntent
+      summary: Request a payment
+      description: |
+        Submit a payment intent. Countersign evaluates it against the agent's active policy and responds with
+        a decision. `DENIED` intents are returned with status `422` and are never sent to PayPal.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentIntentRequest'
+            examples:
+              softwareInvoice:
+                summary: A $49.00 software invoice (needs human countersign)
+                value:
+                  recipient:
+                    name: Second Signature Cloud
+                    email: vendor@example.com
+                  amount:
+                    value: '49.00'
+                    currency: USD
+                  description: November software invoice
+                  invoice_reference: INV-2026-1101
+      responses:
+        '201':
+          description: |
+            Intent accepted. `decision` is `AUTHORIZED` (payout submitted) or `PENDING_APPROVAL` (waiting for a
+            human countersign).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+              examples:
+                pendingApproval:
+                  summary: Above the countersign threshold
+                  value:
+                    id: pi_9d5db09781c7f6e7
+                    workspaceId: ws_demo_001
+                    agentId: agt_operations_001
+                    agentName: operations-agent
+                    policyVersionId: pol_ver_003
+                    recipientId: rec_demo_cloud_001
+                    recipientSnapshot:
+                      displayName: Second Signature Cloud
+                      email: vendor@example.com
+                      status: APPROVED
+                    amountMinor: 4900
+                    currency: USD
+                    description: November software invoice
+                    invoiceReference: INV-2026-1101
+                    metadata: {}
+                    idempotencyKey: 0b9a1c1e-2c3d-4e5f-8a9b-1c2d3e4f5a6b
+                    decision: PENDING_APPROVAL
+                    status: PENDING_APPROVAL
+                    reasonCodes:
+                    - HUMAN_APPROVAL_REQUIRED
+                    explanation: Within the agent's spending limits, but above the $40.00 approval threshold.
+                    checks:
+                    - id: max_transaction
+                      label: Within $100.00 per-transaction limit
+                      status: passed
+                    - id: approval_condition
+                      label: Above $40.00 approval threshold
+                      status: warning
+                      detail: Amount $49.00 strictly exceeds threshold $40.00
+                    createdAt: '2026-11-11T17:04:24.000Z'
+                    updatedAt: '2026-11-11T17:04:24.000Z'
+        '200':
+          description: Idempotent replay of an earlier request with the same key and body.
+          headers:
+            Idempotent-Replay:
+              description: Always `true` on a replay.
+              schema:
+                type: string
+                enum:
+                - 'true'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: The `Idempotency-Key` was already used with a different request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Idempotency key was already used with a different request
+                code: IDEMPOTENCY_KEY_REUSED
+        '422':
+          description: |
+            Denied by policy. The intent is recorded with `decision: DENIED` and machine-readable `reasonCodes`;
+            nothing was sent to PayPal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+              example:
+                id: pi_f47989d417881414
+                agentId: agt_operations_001
+                agentName: operations-agent
+                amountMinor: 18000
+                currency: USD
+                decision: DENIED
+                status: DENIED
+                reasonCodes:
+                - AMOUNT_EXCEEDS_TRANSACTION_LIMIT
+                explanation: Payment of $180.00 exceeds the per-transaction limit of $100.00.
+                checks:
+                - id: max_transaction
+                  label: Within $100.00 per-transaction limit
+                  status: failed
+                  detail: $180.00 exceeds $100.00
+                createdAt: '2026-11-11T17:04:24.000Z'
+                updatedAt: '2026-11-11T17:04:24.000Z'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    get:
+      tags:
+      - Payment intents
+      operationId: listPaymentIntents
+      summary: List this agent's payment intents
+      description: Returns only the authenticated agent's intents, newest first.
+      parameters:
+      - name: status
+        in: query
+        required: false
+        description: Only return intents in this status.
+        schema:
+          $ref: '#/components/schemas/PaymentStatus'
+      responses:
+        '200':
+          description: The agent's payment intents.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PaymentIntent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /agent/payment-intents/{id}:
+    get:
+      tags:
+      - Payment intents
+      operationId: getPaymentIntent
+      summary: Get a payment intent
+      description: |
+        Fetch one intent, including its checks, approval, budget reservation and PayPal payout reference.
+        Poll this until `status` is terminal (`SUCCEEDED`, `FAILED`, `DENIED`, `REJECTED`, `EXPIRED`,
+        `RETURNED`, `REFUNDED`).
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: Payment intent id, for example `pi_9d5db09781c7f6e7`.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The payment intent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No such intent for this agent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Payment intent not found
+                code: NOT_FOUND
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerError'
+components:
+  securitySchemes:
+    agentBearer:
+      type: http
+      scheme: bearer
+      description: Agent token in the form `cs_<agentId>_<secret>`, issued once at registration.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Unique key for this request. Strongly recommended: without it a retry creates a second intent.
+        Re-sending the same key and body returns the original intent; a different body returns `409`.
+      schema:
+        type: string
+        maxLength: 200
+      example: 0b9a1c1e-2c3d-4e5f-8a9b-1c2d3e4f5a6b
+  responses:
+    BadRequest:
+      description: The request body is invalid (for example a malformed amount).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: amount must be a valid decimal amount
+            code: INVALID_REQUEST
+    Unauthorized:
+      description: Missing or invalid agent bearer token, or the agent is revoked.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Invalid or missing agent bearer token
+            code: UNAUTHORIZED
+    RateLimited:
+      description: Too many requests. Back off and retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Too many requests
+            code: RATE_LIMITED
+    ServerError:
+      description: Unexpected server error. Safe to retry with the same `Idempotency-Key`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Internal server error
+            code: INTERNAL_ERROR
+  schemas:
+    Error:
+      type: object
+      required:
+      - error
+      - code
+      properties:
+        error:
+          type: string
+          description: Human-readable message.
+        code:
+          type: string
+          description: Stable machine-readable code, for example `UNAUTHORIZED` or `IDEMPOTENCY_KEY_REUSED`.
+    Health:
+      type: object
+      required:
+      - status
+      - service
+      - timestamp
+      - ledgerChainValid
+      properties:
+        status:
+          type: string
+          example: ok
+          description: Overall service status.
+        service:
+          type: string
+          description: Name of the service.
+          example: Countersign Financial Control Plane
+        timestamp:
+          type: string
+          format: date-time
+          description: Server time when the check ran (UTC).
+          example: '2026-11-11T17:04:24.000Z'
+        ledgerChainValid:
+          type: boolean
+          description: Whether the tamper-evident ledger hash chain currently verifies.
+        ledgerHeadHash:
+          type: string
+          description: Hash of the newest ledger block. Publish it externally to detect tail truncation.
+          example: 7d99d803517b4163cf5b2e1474eb7ba8a66551142d25306e9f0972a25a47e844
+        authRequired:
+          type: boolean
+          description: Whether the console requires an access token.
+          example: true
+    Money:
+      type: object
+      required:
+      - value
+      - currency
+      properties:
+        value:
+          type: string
+          description: Decimal amount in major units with up to two decimals.
+          pattern: ^[0-9]+(\.[0-9]{1,2})?$
+          example: '49.00'
+        currency:
+          type: string
+          description: ISO currency code. The sandbox policy allows USD.
+          default: USD
+          example: USD
+    Recipient:
+      type: object
+      required:
+      - email
+      properties:
+        name:
+          type: string
+          description: Display name. Defaults to the email when omitted.
+          example: Second Signature Cloud
+        email:
+          type: string
+          format: email
+          description: PayPal receiver email.
+          example: vendor@example.com
+    PaymentIntentRequest:
+      type: object
+      required:
+      - recipient
+      - amount
+      properties:
+        recipient:
+          $ref: '#/components/schemas/Recipient'
+        amount:
+          $ref: '#/components/schemas/Money'
+        description:
+          type: string
+          description: Payment memo. Defaults to `Agent Payment Intent`.
+          example: November software invoice
+        invoice_reference:
+          type: string
+          maxLength: 120
+          description: Your reference for this payment. Generated when omitted.
+          example: INV-2026-1101
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Free-form data stored with the intent.
+          example:
+            source: operations-agent
+      example:
+        recipient:
+          name: Second Signature Cloud
+          email: vendor@example.com
+        amount:
+          value: '49.00'
+          currency: USD
+        description: November software invoice
+        invoice_reference: INV-2026-1101
+    Decision:
+      type: string
+      description: The policy engine's verdict.
+      enum:
+      - AUTHORIZED
+      - PENDING_APPROVAL
+      - DENIED
+    PaymentStatus:
+      type: string
+      description: Lifecycle status of the intent.
+      enum:
+      - RECEIVED
+      - DENIED
+      - PENDING_APPROVAL
+      - REJECTED
+      - EXPIRED
+      - APPROVED
+      - EXECUTING
+      - PENDING
+      - PROCESSING
+      - SUCCEEDED
+      - FAILED
+      - UNCLAIMED
+      - RETURNED
+      - HELD
+      - BLOCKED
+      - REFUNDED
+    ReasonCode:
+      type: string
+      description: Machine-readable reason behind a decision.
+      enum:
+      - AGENT_INACTIVE
+      - AGENT_REVOKED
+      - NO_ACTIVE_POLICY
+      - INVALID_REQUEST
+      - CURRENCY_NOT_ALLOWED
+      - AMOUNT_NOT_POSITIVE
+      - AMOUNT_EXCEEDS_TRANSACTION_LIMIT
+      - RECIPIENT_NOT_APPROVED
+      - DAILY_LIMIT_EXCEEDED
+      - MONTHLY_LIMIT_EXCEEDED
+      - HUMAN_APPROVAL_REQUIRED
+      - NEW_RECIPIENT_APPROVAL_REQUIRED
+      - POLICY_CHANGED_SINCE_APPROVAL
+      - PAYMENT_EXECUTION_UNAVAILABLE
+    EvaluationCheck:
+      type: object
+      required:
+      - id
+      - label
+      - status
+      properties:
+        id:
+          type: string
+          example: max_transaction
+          description: Stable identifier of the check.
+        label:
+          type: string
+          example: Within $100.00 per-transaction limit
+          description: Human-readable result of the check.
+        status:
+          type: string
+          enum:
+          - passed
+          - warning
+          - failed
+          description: 'Outcome of the check: `passed`, `warning` (needs a human) or `failed` (denies the request).'
+          example: passed
+        detail:
+          type: string
+          description: Extra context, usually present for warnings and failures.
+          example: Amount $49.00 strictly exceeds threshold $40.00
+    PolicyVersion:
+      type: object
+      description: Immutable snapshot of the policy version the decision was made under.
+      properties:
+        id:
+          type: string
+          description: Unique id of this policy version.
+          example: pol_ver_003
+        policyId:
+          type: string
+          description: Id of the policy this version belongs to.
+          example: pol_demo_001
+        version:
+          type: integer
+          description: Version number, increasing with each change.
+          example: 3
+        maxTransactionMinor:
+          type: integer
+          description: Per-transaction cap in minor units (cents).
+          example: 10000
+        dailyLimitMinor:
+          type: integer
+          description: Daily spending cap in minor units (cents), counting settled plus reserved spend.
+          example: 12000
+        monthlyLimitMinor:
+          type: integer
+          description: Monthly spending cap in minor units (cents).
+          example: 30000
+        approvalMode:
+          type: string
+          enum:
+          - NEVER
+          - ABOVE_THRESHOLD
+          - ALWAYS
+          description: 'When a human countersign is required: never, above a threshold, or always.'
+          example: ABOVE_THRESHOLD
+        approvalThresholdMinor:
+          type: integer
+          nullable: true
+          description: Amount above which approval is required, in minor units. Null unless the mode is `ABOVE_THRESHOLD`.
+          example: 4000
+        allowNewRecipients:
+          type: boolean
+          description: Whether payments to recipients not on the allowlist may proceed (with approval).
+          example: false
+        currencyAllowlist:
+          type: array
+          items:
+            type: string
+          description: Currencies the agent may pay in.
+          example:
+          - USD
+        status:
+          type: string
+          description: Lifecycle status of the version, for example `ACTIVE` or `ARCHIVED`.
+          example: ACTIVE
+        createdBy:
+          type: string
+          description: Who created the version.
+          example: usr_owner_001
+        createdAt:
+          type: string
+          format: date-time
+          description: When the version was created (UTC).
+          example: '2026-11-11T17:04:24.000Z'
+        changeNote:
+          type: string
+          description: Free-text note describing why the version was created.
+          example: Active operational policy with $40 countersign threshold
+    Approval:
+      type: object
+      description: The human countersign record for an intent that needed one.
+      properties:
+        id:
+          type: string
+          description: Unique id of the approval record.
+          example: appr_6af3cce84c7d
+        paymentIntentId:
+          type: string
+          description: Id of the payment intent being approved.
+          example: pi_9d5db09781c7f6e7
+        requestedAt:
+          type: string
+          format: date-time
+          description: When approval was requested (UTC).
+          example: '2026-11-11T17:04:24.000Z'
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the pending approval expires and its reservation is released (UTC).
+          example: '2026-11-12T17:04:24.000Z'
+        reviewedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When a human reviewed the request (UTC). Null while pending.
+          example: '2026-11-11T17:04:24.000Z'
+        reviewedBy:
+          type: string
+          nullable: true
+          description: Name of the human reviewer. Null while pending.
+          example: Alex Chen
+        decision:
+          type: string
+          enum:
+          - APPROVED
+          - REJECTED
+          nullable: true
+          description: The reviewer's decision. Null while pending.
+          example: APPROVED
+        comment:
+          type: string
+          description: Optional reviewer comment.
+          example: Verified against the invoice.
+        snapshotHash:
+          type: string
+          description: Hash of the exact request the approval is bound to.
+    BudgetReservation:
+      type: object
+      description: Budget held for the intent until the payout settles or is released.
+      properties:
+        id:
+          type: string
+          description: Unique id of the reservation.
+          example: res_ae90941e3f67
+        paymentIntentId:
+          type: string
+          description: Id of the payment intent the budget is held for.
+          example: pi_9d5db09781c7f6e7
+        agentId:
+          type: string
+          description: Id of the agent whose budget is held.
+          example: agt_operations_001
+        amountMinor:
+          type: integer
+          description: Amount held, in minor units (cents).
+          example: 4900
+        currency:
+          type: string
+          description: ISO currency code of the held amount.
+          example: USD
+        status:
+          type: string
+          enum:
+          - HELD
+          - SETTLED
+          - RELEASED
+          - EXPIRED
+          description: '`HELD` while pending, `SETTLED` once PayPal confirms, `RELEASED` or `EXPIRED` if not spent.'
+          example: HELD
+        createdAt:
+          type: string
+          format: date-time
+          description: When the budget was reserved (UTC).
+          example: '2026-11-11T17:04:24.000Z'
+        expiresAt:
+          type: string
+          format: date-time
+          description: When an unapproved reservation expires and is released (UTC).
+          example: '2026-11-12T17:04:24.000Z'
+        releasedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the reservation was released (UTC). Null unless released.
+        settledAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the reservation settled (UTC). Null until PayPal confirms.
+    PayoutRecord:
+      type: object
+      description: PayPal Payouts references for an executed payment.
+      properties:
+        id:
+          type: string
+          description: Unique id of the payout record.
+          example: pp_7382bc4d1414
+        paymentIntentId:
+          type: string
+          description: Id of the payment intent that was paid.
+          example: pi_9d5db09781c7f6e7
+        payoutBatchId:
+          type: string
+          description: PayPal payout batch id.
+          example: SP857V2TC8WXS
+        payoutItemId:
+          type: string
+          description: PayPal payout item id.
+          example: YWA2496UEPCBC
+        transactionId:
+          type: string
+          nullable: true
+          description: PayPal transaction id, available once the payout has completed.
+          example: 5U186223720355138
+        batchStatus:
+          type: string
+          description: PayPal batch status, for example `PENDING` or `SUCCESS`.
+          example: SUCCESS
+        itemStatus:
+          type: string
+          description: PayPal item status, for example `PENDING` or `SUCCESS`.
+          example: SUCCESS
+        createdAt:
+          type: string
+          format: date-time
+          description: When the payout was submitted (UTC).
+          example: '2026-11-11T17:04:24.000Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the payout record last changed (UTC).
+          example: '2026-11-11T17:04:24.000Z'
+    Agent:
+      type: object
+      properties:
+        id:
+          type: string
+          example: agt_operations_001
+          description: Unique agent id.
+        workspaceId:
+          type: string
+          description: Workspace the agent belongs to.
+          example: ws_demo_001
+        name:
+          type: string
+          example: operations-agent
+          description: Display name of the agent.
+        description:
+          type: string
+          description: What the agent does.
+          example: Autonomous operations runner handling software renewals and server costs
+        tokenPrefix:
+          type: string
+          example: cs_agt_operations_001
+          description: Non-secret prefix of the agent's bearer token (`cs_<agentId>`). The secret part is shown
+            only once at registration.
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+          - REVOKED
+          description: '`ACTIVE` agents can request payments; `PAUSED` agents cannot; `REVOKED` is permanent.'
+          example: ACTIVE
+        activePolicyVersionId:
+          type: string
+          nullable: true
+          description: Id of the policy version currently applied to this agent. Null if none.
+          example: pol_ver_003
+        createdAt:
+          type: string
+          format: date-time
+          description: When the agent was registered (UTC).
+          example: '2026-11-02T12:00:00Z'
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the agent last called the API (UTC). Null if never.
+          example: '2026-11-11T17:04:24.000Z'
+    PaymentIntent:
+      type: object
+      required:
+      - id
+      - agentId
+      - amountMinor
+      - currency
+      - decision
+      - status
+      - reasonCodes
+      - explanation
+      - checks
+      - createdAt
+      properties:
+        id:
+          type: string
+          example: pi_9d5db09781c7f6e7
+          description: Unique id of the payment intent.
+        workspaceId:
+          type: string
+          description: Workspace the intent belongs to.
+          example: ws_demo_001
+        agentId:
+          type: string
+          description: Id of the agent that requested the payment.
+          example: agt_operations_001
+        agentName:
+          type: string
+          description: Display name of the requesting agent.
+          example: operations-agent
+        policyVersionId:
+          type: string
+          description: Id of the policy version the decision was made under.
+          example: pol_ver_003
+        policySnapshot:
+          $ref: '#/components/schemas/PolicyVersion'
+        recipientId:
+          type: string
+          nullable: true
+          description: Id of the matching approved recipient. Null when the recipient was not on the allowlist.
+          example: rec_demo_cloud_001
+        recipientSnapshot:
+          type: object
+          properties:
+            displayName:
+              type: string
+            email:
+              type: string
+              format: email
+            status:
+              type: string
+              enum:
+              - APPROVED
+              - BLOCKED
+              - NEW
+          description: The recipient exactly as it was when the decision was made.
+        amountMinor:
+          type: integer
+          description: Amount in minor units (cents). 4900 is $49.00.
+        currency:
+          type: string
+          description: ISO currency code.
+          example: USD
+        description:
+          type: string
+          description: Payment memo supplied by the agent.
+          example: November software invoice
+        invoiceReference:
+          type: string
+          description: Reference supplied by the agent, or generated.
+          example: INV-2026-1101
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Free-form data supplied with the request.
+        idempotencyKey:
+          type: string
+          description: Idempotency key the intent was created with.
+          example: 0b9a1c1e-2c3d-4e5f-8a9b-1c2d3e4f5a6b
+        requestHash:
+          type: string
+          description: SHA-256 hash of the canonical request, used to detect key reuse with a different body.
+          example: 4079522fb3f616f2385789d40a7012d0815c20b39551bdb8d783e78a4dcd7fd5
+        decision:
+          $ref: '#/components/schemas/Decision'
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        reasonCodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReasonCode'
+          description: Machine-readable reasons behind the decision.
+          example:
+          - HUMAN_APPROVAL_REQUIRED
+        explanation:
+          type: string
+          description: Plain-language explanation of the decision.
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvaluationCheck'
+          description: The individual deterministic policy checks, in evaluation order.
+        approval:
+          $ref: '#/components/schemas/Approval'
+        reservation:
+          $ref: '#/components/schemas/BudgetReservation'
+        payout:
+          $ref: '#/components/schemas/PayoutRecord'
+        createdAt:
+          type: string
+          format: date-time
+          description: When the intent was received (UTC).
+          example: '2026-11-11T17:04:24.000Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the intent last changed (UTC).
+          example: '2026-11-11T17:04:24.000Z'

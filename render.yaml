@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: countersign
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: sh -c 'if [ -n "$DATABASE_URL" ]; then npx prisma db push --skip-generate; fi && npm run start'
+    healthCheckPath: /api/v1/health
+    envVars:
+      # Set this to a Render Postgres connection string to enable durable state.
+      - key: DATABASE_URL
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: APP_BASE_URL
+        fromService:
+          type: web
+          name: countersign
+          property: host
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      # Demo deployment: simulate payouts when credentials are absent.
+      # Remove this (and provide PayPal credentials) for fail-closed production.
+      - key: PAYPAL_SIMULATE
+        value: "true"
+      - key: GEMINI_API_KEY
+        sync: false
+      # Set by hand in the Render dashboard (sandbox-only value, shared with judges
+      # in the Devpost testing instructions rather than committed here).
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: LEDGER_HASH_SECRET
+        generateValue: true
+      - key: AGENT_TOKEN_PEPPER
+        generateValue: true
+      - key: DEMO_AGENT_SECRET
+        sync: false
+      # Sandbox personal account that receives demo payouts.
+      - key: DEMO_RECIPIENT_EMAIL
+        sync: false

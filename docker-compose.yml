@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: countersign-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: countersign
+      POSTGRES_PASSWORD: countersign_password
+      POSTGRES_DB: countersign
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
